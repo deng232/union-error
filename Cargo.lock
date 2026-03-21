@@ -3,14 +3,21 @@
 version = 4
 
 [[package]]
-name = "error_union"
+name = "demo-app"
 version = "0.1.0"
 dependencies = [
- "error_union_derive",
+ "error-union",
 ]
 
 [[package]]
-name = "error_union_derive"
+name = "error-union"
+version = "0.1.0"
+dependencies = [
+ "error-union-derive",
+]
+
+[[package]]
+name = "error-union-derive"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",

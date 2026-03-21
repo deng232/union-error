@@ -1,9 +1,9 @@
 [package]
-name = "error_union"
+name = "error-union"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Flat typed error unions with track_caller-aware Located wrappers"
 
 [dependencies]
-error_union_derive = { path = "../error-union-derive" }
+error-union-derive = { path = "../error-union-derive" }

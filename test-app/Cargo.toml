@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-error-union = { path = "../error-union/error-union" }
+error-union = { path = "../error-union" }
