@@ -1,0 +1,266 @@
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+index 0000000..ef21034
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,4 @@
++[workspace]
++members = ["error-union", "error-union-derive"]
++resolver = "2"
++
+diff --git a/error-union/Cargo.toml b/error-union/Cargo.toml
+new file mode 100644
+index 0000000..e0335d7
+--- /dev/null
++++ b/error-union/Cargo.toml
+@@ -0,0 +1,7 @@
++[package]
++name = "error-union"
++version = "0.1.0"
++edition = "2021"
++
++[dependencies]
++error-union-derive = { path = "../error-union-derive" }
+diff --git a/error-union/src/lib.rs b/error-union/src/lib.rs
+new file mode 100644
+index 0000000..16ce78d
+--- /dev/null
++++ b/error-union/src/lib.rs
+@@ -0,0 +1,110 @@
++#![forbid(unsafe_code)]
++
++use std::error::Error;
++use std::fmt::{self, Display, Formatter};
++use std::panic::Location;
++
++pub use error_union_derive::ErrorUnion;
++
++#[derive(Debug)]
++pub struct Located<E> {
++    source: E,
++    location: &'static Location<'static>,
++}
++
++impl<E> Located<E> {
++    #[track_caller]
++    pub fn new(source: E) -> Self {
++        Self {
++            source,
++            location: Location::caller(),
++        }
++    }
++
++    pub fn source_ref(&self) -> &E {
++        &self.source
++    }
++
++    pub fn into_source(self) -> E {
++        self.source
++    }
++
++    pub fn location(&self) -> &'static Location<'static> {
++        self.location
++    }
++}
++
++impl<E: Display> Display for Located<E> {
++    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
++        write!(
++            f,
++            "{} (at {}:{}:{})",
++            self.source,
++            self.location.file(),
++            self.location.line(),
++            self.location.column()
++        )
++    }
++}
++
++impl<E: Error + 'static> Error for Located<E> {
++    fn source(&self) -> Option<&(dyn Error + 'static)> {
++        Some(&self.source)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ErrorUnion, Located};
++
++    #[derive(Debug, ErrorUnion)]
++    enum AppError {
++        Parse(Located<std::num::ParseIntError>),
++        Io(Located<std::io::Error>),
++    }
++
++    type Result<T> = std::result::Result<T, AppError>;
++
++    fn parse_num(s: &str) -> Result<u32> {
++        Ok(s.parse()?)
++    }
++
++    fn read_file(path: &str) -> Result<String> {
++        Ok(std::fs::read_to_string(path)?)
++    }
++
++    #[test]
++    fn use_case_parse_error_is_flat_and_located() {
++        let expected_line = line!() + 1;
++        let err = parse_num("abc").unwrap_err();
++
++        match err {
++            AppError::Parse(inner) => {
++                assert_eq!(inner.location().line(), expected_line);
++                assert_eq!(inner.source_ref().to_string(), "invalid digit found in string");
++            }
++            other => panic!("expected AppError::Parse(_), got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn use_case_io_error_is_flat_and_located() {
++        let expected_line = line!() + 1;
++        let err = read_file("this-file-should-not-exist.txt").unwrap_err();
++
++        match err {
++            AppError::Io(inner) => {
++                assert_eq!(inner.location().line(), expected_line);
++                assert!(inner.source_ref().kind() == std::io::ErrorKind::NotFound);
++            }
++            other => panic!("expected AppError::Io(_), got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn display_includes_source_and_location() {
++        let err = parse_num("abc").unwrap_err();
++        let rendered = err.to_string();
++
++        assert!(rendered.contains("invalid digit found in string"));
++        assert!(rendered.contains("error-union/src/lib.rs"));
++    }
++
++    #[test]
++    fn source_chain_exposes_located_wrapper() {
++        let err = parse_num("abc").unwrap_err();
++        assert!(std::error::Error::source(&err).is_some());
++    }
++}
+diff --git a/error-union-derive/Cargo.toml b/error-union-derive/Cargo.toml
+new file mode 100644
+index 0000000..e1c1a6e
+--- /dev/null
++++ b/error-union-derive/Cargo.toml
+@@ -0,0 +1,12 @@
++[package]
++name = "error-union-derive"
++version = "0.1.0"
++edition = "2021"
++
++[lib]
++proc-macro = true
++
++[dependencies]
++syn = { version = "2", features = ["full"] }
++quote = "1"
++proc-macro2 = "1"
+diff --git a/error-union-derive/src/lib.rs b/error-union-derive/src/lib.rs
+new file mode 100644
+index 0000000..acef221
+--- /dev/null
++++ b/error-union-derive/src/lib.rs
+@@ -0,0 +1,92 @@
++use proc_macro::TokenStream;
++use quote::quote;
++use syn::{parse_macro_input, Data, DeriveInput, Fields};
++
++#[proc_macro_derive(ErrorUnion)]
++pub fn derive_error_union(input: TokenStream) -> TokenStream {
++    let input = parse_macro_input!(input as DeriveInput);
++
++    let enum_name = input.ident;
++
++    let data = match input.data {
++        Data::Enum(e) => e,
++        _ => {
++            return syn::Error::new_spanned(enum_name, "ErrorUnion only supports enums")
++                .to_compile_error()
++                .into();
++        }
++    };
++
++    let mut from_impls = Vec::new();
++    let mut display_arms = Vec::new();
++    let mut source_arms = Vec::new();
++
++    for variant in data.variants {
++        let variant_name = variant.ident;
++
++        let field_ty = match variant.fields {
++            Fields::Unnamed(f) if f.unnamed.len() == 1 => f.unnamed.first().unwrap().ty.clone(),
++            _ => {
++                return syn::Error::new_spanned(
++                    variant_name,
++                    "each variant must have exactly one unnamed field",
++                )
++                .to_compile_error()
++                .into();
++            }
++        };
++
++        let inner_ty = extract_inner_type(&field_ty).unwrap_or_else(|| field_ty.clone());
++
++        from_impls.push(quote! {
++            impl From<#inner_ty> for #enum_name {
++                #[track_caller]
++                fn from(source: #inner_ty) -> Self {
++                    Self::#variant_name(error_union::Located::new(source))
++                }
++            }
++        });
++
++        display_arms.push(quote! {
++            Self::#variant_name(inner) => std::fmt::Display::fmt(inner, f),
++        });
++
++        source_arms.push(quote! {
++            Self::#variant_name(inner) => Some(inner as &(dyn std::error::Error + 'static)),
++        });
++    }
++
++    let expanded = quote! {
++        impl std::fmt::Display for #enum_name {
++            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++                match self {
++                    #(#display_arms)*
++                }
++            }
++        }
++
++        impl std::error::Error for #enum_name {
++            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++                match self {
++                    #(#source_arms)*
++                }
++            }
++        }
++
++        #(#from_impls)*
++    };
++
++    expanded.into()
++}
++
++fn extract_inner_type(ty: &syn::Type) -> Option<syn::Type> {
++    if let syn::Type::Path(type_path) = ty {
++        let seg = type_path.path.segments.last()?;
++        if seg.ident == "Located" {
++            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
++                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
++                    return Some(inner.clone());
++                }
++            }
++        }
++    }
++
++    None
++}

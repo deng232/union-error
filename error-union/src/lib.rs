@@ -58,26 +58,3 @@ where
         Some(&self.source)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, ErrorUnion)]
-    enum DemoError {
-        Parse(Located<std::num::ParseIntError>),
-    }
-
-    fn parse_fail() -> Result<u32, DemoError> {
-        let n = "x".parse::<u32>()?;
-        Ok(n)
-    }
-
-    #[test]
-    fn located_records_call_site() {
-        let err = parse_fail().unwrap_err();
-        let display = err.to_string();
-        assert!(display.contains("invalid digit found in string"));
-        assert!(display.contains("src/lib.rs") || display.contains("tests"));
-    }
-}
