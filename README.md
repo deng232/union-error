@@ -113,19 +113,3 @@ Current derive behavior expects a constrained enum shape:
 2. Intended variant field form is **`Located<T>`**.
 3. No extra derive-specific custom attributes are supported.
 4. If multiple variants use the same inner leaf type `T`, conflicting `From<T>` impls would result (so inner leaf types should be unique).
-
-## Comparison
-
-### Versus `thiserror`
-
-- `thiserror` is general-purpose and flexible for custom manual error design.
-- `error-union` is opinionated toward one flat root enum with generated conversions and call-site location capture via `Located<T>`.
-
-### Versus `anyhow`
-
-- `anyhow` favors ergonomic dynamic error aggregation (`anyhow::Error`) for application code.
-- `error-union` keeps static enum variants and concrete leaf types, ideal when you want explicit compile-time error taxonomy and pattern matching.
-
-## Summary
-
-Use `error-union` when you want a single, explicit, maintainable error surface for an application: flat enum variants, automatic leaf conversion through `?`, and accurate conversion-site locations for debugging and diagnostics.
