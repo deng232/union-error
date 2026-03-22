@@ -27,3 +27,42 @@ This project demonstrates a custom Rust error-handling pattern with the followin
 5. **Zero nesting behavior**
    - If a function already returns `AppError`, then calling it with `?` MUST NOT re-wrap or change location
    - This ensures correct propagation
+
+
+# test-app rules
+
+This crate is a demo for the `error-union` pattern.
+
+## Non-negotiable architecture
+
+- There is exactly one propagated error type: `crate::error::AppError`.
+- There is exactly one propagated result alias: `crate::error::Result<T>`.
+- `file1.rs`, `file2.rs`, and `main.rs` must all use `crate::error::Result<T>`.
+- Do not create `File1Error`, `File2Error`, or any other per-file propagated error enum.
+- Do not introduce nested error wrappers like `AppError::File(File1Error)`.
+- Error tree height must stay 1.
+
+## Conversion model
+
+- Leaf errors like `std::num::ParseIntError` and `std::io::Error` are converted directly into `AppError`.
+- `?` must convert leaf errors into `AppError`.
+- If a function already returns `AppError`, callers using `?` must propagate it unchanged.
+- Do not re-wrap `AppError`.
+
+## Location model
+
+- Every leaf error inside `AppError` is stored as `Located<T>`.
+- `Located<T>` exists to preserve `#[track_caller]` call-site information.
+- The stored location must point to the line where `?` converted the leaf error.
+- Do not replace `Located<T>` with plain error types.
+
+## Editing rules
+
+When changing demo files:
+- preserve the flat `AppError` model
+- preserve `crate::error::Result<T>`
+- preserve direct calls like `file1::parse_number(...)` from `file2.rs`
+- do not "improve" the design into per-module errors
+- do not add `thiserror`, `anyhow`, or per-file error enums
+
+If unsure, prefer the existing architecture over conventional Rust error layering.
