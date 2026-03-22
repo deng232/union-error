@@ -1,4 +1,4 @@
-use error_union::{ErrorUnion, Located};
+use union_error::{ErrorUnion, Located};
 
 #[derive(Debug, ErrorUnion)]
 pub enum AppError {

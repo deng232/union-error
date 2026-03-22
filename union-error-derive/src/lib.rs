@@ -3,7 +3,7 @@ use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 #[proc_macro_derive(ErrorUnion)]
-pub fn derive_error_union(input: TokenStream) -> TokenStream {
+pub fn derive_union_error(input: TokenStream) -> TokenStream {
     // Parse the incoming Rust item as a `syn::DeriveInput`.
     //
     // This is the standard entry type for derive macros and contains:
@@ -80,7 +80,7 @@ pub fn derive_error_union(input: TokenStream) -> TokenStream {
         // impl From<T> for Enum {
         //     #[track_caller]
         //     fn from(source: T) -> Self {
-        //         Self::Variant(error_union::Located::new(source))
+        //         Self::Variant(union_error::Located::new(source))
         //     }
         // }
         //
@@ -89,7 +89,7 @@ pub fn derive_error_union(input: TokenStream) -> TokenStream {
             impl From<#inner_ty> for #enum_name {
                 #[track_caller]
                 fn from(source: #inner_ty) -> Self {
-                    Self::#variant_name(error_union::Located::new(source))
+                    Self::#variant_name(union_error::Located::new(source))
                 }
             }
         });
@@ -178,13 +178,13 @@ pub fn derive_error_union(input: TokenStream) -> TokenStream {
 fn extract_inner_type(ty: &syn::Type) -> Option<syn::Type> {
     // We only care about path types like:
     // - Located<T>
-    // - error_union::Located<T>
+    // - union_error::Located<T>
     if let syn::Type::Path(type_path) = ty {
         // Look at the last path segment.
         //
         // Examples:
         // - Located<T>                  -> last segment = Located
-        // - error_union::Located<T>     -> last segment = Located
+        // - union_error::Located<T>     -> last segment = Located
         let seg = type_path.path.segments.last()?;
 
         // Only match types whose last path segment is literally `Located`.

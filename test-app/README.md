@@ -1,6 +1,6 @@
-# demo-app: `error-union` usage example
+# demo-app: `union-error` usage example
 
-This example application demonstrates how to use `error-union` in a real module layout with one centralized `AppError`, flat propagation, and call-site location tracking.
+This example application demonstrates how to use `union-error` in a real module layout with one centralized `AppError`, flat propagation, and call-site location tracking.
 
 ## Overview
 
@@ -25,7 +25,7 @@ The app intentionally triggers parse and I/O paths to show how `?` automatically
 In `src/error.rs`:
 
 ```rust
-use error_union::{ErrorUnion, Located};
+use union_error::{ErrorUnion, Located};
 
 #[derive(Debug, ErrorUnion)]
 pub enum AppError {
@@ -98,4 +98,4 @@ You can create a `number.txt` file in `test-app/` to exercise the successful pat
 
 ## Summary
 
-This demo shows the intended usage pattern for `error-union`: one flat `AppError`, automatic `?` conversions from leaf errors, and precise conversion-site diagnostics through `Located<T>`.
+This demo shows the intended usage pattern for `union-error`: one flat `AppError`, automatic `?` conversions from leaf errors, and precise conversion-site diagnostics through `Located<T>`.

@@ -1,6 +1,6 @@
 ==================== INSTRUCTIONS.md ====================
 
-# Project: error-union demo
+# Project: union-error demo
 
 This project demonstrates a custom Rust error-handling pattern with the following goals:
 
