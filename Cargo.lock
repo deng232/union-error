@@ -6,7 +6,7 @@ version = 4
 name = "demo-app"
 version = "0.1.0"
 dependencies = [
- "union-error 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "union-error",
 ]
 
 [[package]]
@@ -48,32 +48,12 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 name = "union-error"
 version = "0.1.0"
 dependencies = [
- "union-error-derive 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "union-error"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa81c8ede5996bf7b2c92c820e7fa4aee937d5358b12dc9a10ebb83867646814"
-dependencies = [
- "union-error-derive 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "union-error-derive",
 ]
 
 [[package]]
 name = "union-error-derive"
 version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "union-error-derive"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3d7a92f5b1dc749538893b50d58a2e0c068413dc1e62e92ba84f97f8bfb33a"
 dependencies = [
  "proc-macro2",
  "quote",
