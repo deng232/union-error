@@ -7,4 +7,4 @@ description = "Flat typed error unions with track_caller-aware Located wrappers"
 repository = "https://github.com/deng232/error-union"
 
 [dependencies]
-union-error-derive = { path = "../union-error-derive" }
+union-error-derive = "0.1.0"
