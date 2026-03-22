@@ -1,77 +1,131 @@
-Write a README.md for a Rust crate named `error-union`.
+# error-union
 
-The README should be professional, clear, and structured.
+`error-union` is a Rust crate for building a **flat, type-safe error system** with precise call-site tracking.
 
-Focus on:
+The crate is designed for applications that want one centralized error enum (for example, `AppError`) without nested error trees, dynamic dispatch (`Box<dyn Error>`), or repeated boilerplate conversion code.
 
-1. INTRODUCTION
-- Explain that this crate provides a flat, zero-nesting, type-safe error system
-- Mention key goals:
-  - single centralized error enum
-  - no nested error types
-  - zero runtime cost (no Box<dyn Error>)
-  - automatic conversion using `?`
-  - precise error location using track_caller
+## Introduction
 
-2. FEATURES
-Include sections explaining:
-- Flat error model (no AppError::File(FileError::Parse))
-- Centralized definition (one enum in error.rs)
-- Automatic From<T> generation via derive macro
-- Located<T> capturing file/line/column
-- No re-wrapping when propagating AppError
+`error-union` focuses on five goals:
 
-3. MECHANISM (VERY IMPORTANT)
-Explain clearly how the macro works:
+1. **Single centralized error enum**: all propagated application errors are listed in one place.
+2. **No nested error types**: avoid patterns like `AppError::File(FileError::Parse(...))`.
+3. **Zero-cost static typing**: concrete enum variants and concrete source types, not trait-object boxing.
+4. **Automatic conversion with `?`**: leaf errors convert into your root enum through generated `From<T>` impls.
+5. **Precise source location**: each converted leaf error is wrapped in `Located<T>`, capturing file/line/column using `#[track_caller]`.
 
-- User writes:
-  enum AppError {
-      Parse(Located<ParseIntError>),
-      Io(Located<std::io::Error>)
-  }
+## Features
 
-- The derive macro generates:
-  impl From<T> for AppError with #[track_caller]
+### Flat error model
 
-- Explain how `?` expands to From::from(...)
-- Explain why track_caller captures the correct location
-- Explain that Located<T> stores:
-  - source error
-  - caller location
+Your public error type is a single enum where each variant stores exactly one leaf error (via `Located<T>`). This keeps tree height at 1 and error matching straightforward.
 
-- Explain error chain:
-  AppError -> Located<T> -> T
+### Centralized definition
 
-4. DESIGN PRINCIPLES
-- Tree height must be 1
-- Only leaf errors are stored
-- No nested enums
-- No dynamic dispatch
-- No extra Display layer
+The enum lives in one module (commonly `error.rs`). Other modules only return `Result<T, AppError>` and use `?`.
 
-5. STRUCTURE
-Explain the workspace layout:
-- error-union (runtime crate)
-  - Located<T>
-- error-union-derive (proc macro)
-  - generates From, Display, Error
+### Automatic `From<T>` generation
 
-6. LIMITATIONS
-- only tuple variants with 1 field
-- must use Located<T>
-- no duplicate inner types
-- no custom attributes (v1)
+`#[derive(ErrorUnion)]` generates `From<LeafError>` for each variant, so any `?` on that leaf type automatically maps into your app error.
 
-7. COMPARISON
-Brief comparison with:
-- thiserror
-- anyhow
+### `Located<T>` call-site capture
 
-8. SUMMARY
-Short closing paragraph describing when to use this crate
+`Located<T>` stores both:
 
-Style:
-- No emojis
-- Clean markdown headings
-- Concise but complete
-- No unnecessary storytelling
+- the original source error `T`
+- `&'static std::panic::Location<'static>` for the conversion call site
+
+Its `Display` implementation prints the source message plus `file:line:column`.
+
+### No re-wrapping when propagating your app error
+
+If a function already returns `AppError`, using `?` in a caller returning `AppError` does not re-convert or change location. Only leaf-to-root conversion introduces a new `Located<T>`.
+
+## Mechanism
+
+### 1) You define the root enum
+
+```rust
+use error_union::{ErrorUnion, Located};
+
+#[derive(Debug, ErrorUnion)]
+pub enum AppError {
+    Parse(Located<std::num::ParseIntError>),
+    Io(Located<std::io::Error>),
+}
+```
+
+### 2) The derive macro generates conversion impls
+
+For each variant `Variant(Located<T>)`, the macro generates:
+
+```rust
+impl From<T> for AppError {
+    #[track_caller]
+    fn from(source: T) -> Self {
+        Self::Variant(error_union::Located::new(source))
+    }
+}
+```
+
+It also generates `Display` and `std::error::Error` impls for the enum.
+
+### 3) `?` uses `From::from`
+
+When `?` is applied to a `Result<_, T>` in a function returning `Result<_, AppError>`, Rust lowers it to a conversion path using `From<T> for AppError`.
+
+Because generated `from` is `#[track_caller]`, and because it calls `Located::new` (also `#[track_caller]`), the stored location points to the precise `?` call site where conversion happened.
+
+### 4) Error chain shape
+
+The runtime source chain is:
+
+- `AppError`
+- `Located<T>`
+- `T`
+
+This gives a typed top-level enum and preserved underlying leaf error.
+
+## Design principles
+
+- Tree height is always 1 for app-level variants.
+- Variants store leaf errors, not nested intermediate enums.
+- No dynamic dispatch is required for propagation.
+- No extra display-wrapper layer beyond `Located<T>`.
+- Conversion and formatting behavior is generated consistently by derive.
+
+## Workspace structure
+
+This repository is a Cargo workspace with two crates:
+
+- **`error-union`** (runtime crate)
+  - exports `Located<T>`
+  - re-exports `ErrorUnion` derive macro
+- **`error-union-derive`** (proc-macro crate)
+  - parses the enum
+  - generates `From`, `Display`, and `Error` implementations
+
+## Limitations (v0.1)
+
+Current derive behavior expects a constrained enum shape:
+
+1. **Tuple variants with exactly one field** are required.
+2. Intended variant field form is **`Located<T>`**.
+3. No extra derive-specific custom attributes are supported.
+4. If multiple variants use the same inner leaf type `T`, conflicting `From<T>` impls would result (so inner leaf types should be unique).
+
+## Comparison
+
+### Versus `thiserror`
+
+- `thiserror` is general-purpose and flexible for custom manual error design.
+- `error-union` is opinionated toward one flat root enum with generated conversions and call-site location capture via `Located<T>`.
+
+### Versus `anyhow`
+
+- `anyhow` favors ergonomic dynamic error aggregation (`anyhow::Error`) for application code.
+- `error-union` keeps static enum variants and concrete leaf types, ideal when you want explicit compile-time error taxonomy and pattern matching.
+
+## Summary
+
+Use `error-union` when you want a single, explicit, maintainable error surface for an application: flat enum variants, automatic leaf conversion through `?`, and accurate conversion-site locations for debugging and diagnostics.

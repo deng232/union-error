@@ -1,23 +1,31 @@
-Write a README.md for a Rust example project demonstrating usage of `error-union`.
+# demo-app: `error-union` usage example
 
-Focus on usage, not implementation details.
+This example application demonstrates how to use `error-union` in a real module layout with one centralized `AppError`, flat propagation, and call-site location tracking.
 
-Include:
+## Overview
 
-1. OVERVIEW
-- This is a demo app using error-union
-- Shows flat error handling and location tracking
+The app intentionally triggers parse and I/O paths to show how `?` automatically converts leaf errors into `AppError` variants while preserving where conversion happened.
 
-2. PROJECT STRUCTURE
-Explain files:
-- error.rs → defines AppError and Result<T>
-- file1.rs → produces parse errors
-- file2.rs → produces IO errors and calls file1
-- main.rs → runs everything and prints errors
+## Project structure
 
-3. DEFINING THE ERROR
+- `src/error.rs`  
+  Defines `AppError` and crate-wide `Result<T>` alias.
 
-Show example:
+- `src/file1.rs`  
+  Contains parse logic and produces parse failures.
+
+- `src/file2.rs`  
+  Performs file I/O and then calls `file1`, demonstrating both direct and delegated propagation.
+
+- `src/main.rs`  
+  Runs the flow, prints top-level error, and walks the `source()` chain.
+
+## Defining the error
+
+In `src/error.rs`:
+
+```rust
+use error_union::{ErrorUnion, Located};
 
 #[derive(Debug, ErrorUnion)]
 pub enum AppError {
@@ -25,56 +33,69 @@ pub enum AppError {
     Io(Located<std::io::Error>),
 }
 
-Explain:
-- All errors are defined here
-- No other modules define error types
+pub type Result<T> = std::result::Result<T, AppError>;
+```
 
-4. USING RESULT
+Key rules:
 
-Explain:
-- All functions return crate::error::Result<T>
-- `?` automatically converts errors into AppError
+- All propagated app errors are listed in this single enum.
+- Other modules do not define additional propagation enums.
+- Variants use `Located<T>` so location is captured when conversion occurs.
 
-5. EXAMPLES
+## Using `Result`
 
-Explain behavior:
+All fallible functions in the app return `crate::error::Result<T>`. This guarantees `?` can convert leaf errors directly into `AppError`.
 
-Case 1: parse failure
-- calling parse_number("abc")
-- error is AppError::Parse
-- location points to file1.rs at parse()?
+Example in `file1.rs`:
 
-Case 2: IO failure
-- missing file
-- error is AppError::Io
-- location points to read_to_string()?
+```rust
+pub fn parse_number(input: &str) -> Result<u32> {
+    let value = input.parse::<u32>()?;
+    Ok(value)
+}
+```
 
-Case 3: nested call
-- file2 calls file1
-- file1 returns AppError
-- file2 does NOT wrap again
-- location stays in file1.rs
+Example in `file2.rs`:
 
-6. IMPORTANT RULES
+```rust
+pub fn read_and_parse(path: &str) -> Result<u32> {
+    let text = std::fs::read_to_string(path)?;
+    let value = file1::parse_number(text.trim())?;
+    Ok(value)
+}
+```
 
-- Always return Result<T>
-- Never define new error enums in modules
-- Never wrap AppError again
-- Do not use unwrap()
+## Behavior examples
 
-7. RUNNING
+### Case 1: Parse failure
 
-cargo run
+If `parse_number("abc")` is called, `input.parse::<u32>()?` fails with `ParseIntError`, which becomes `AppError::Parse`. The location in `Located<_>` points to the `?` site in `file1.rs`.
 
-8. SUMMARY
+### Case 2: I/O failure
 
-Explain:
-- flat error propagation
-- precise location tracking
-- centralized error design
+If `read_and_parse("missing.txt")` is called, `read_to_string(path)?` fails with `std::io::Error`, which becomes `AppError::Io`. The location points to the `?` site in `file2.rs`.
 
-Style:
-- Clear, instructional
-- Minimal theory
-- Focus on how to use
-- No emojis
+### Case 3: Nested call without re-wrapping
+
+`file2::read_and_parse` calls `file1::parse_number(...)?`. When `file1` already returns `AppError`, `file2` propagates that same `AppError` without adding a second wrapper, so the recorded parse location remains in `file1.rs`.
+
+## Important rules
+
+1. Always return `crate::error::Result<T>` from fallible app functions.
+2. Keep the propagated enum centralized in `src/error.rs`.
+3. Do not create intermediate nested propagation enums.
+4. Avoid `unwrap()` in fallible paths; use `?` to preserve typed propagation.
+
+## Running
+
+From the workspace root:
+
+```bash
+cargo run -p demo-app
+```
+
+You can create a `number.txt` file in `test-app/` to exercise the successful path, or run without it to observe `Io` handling.
+
+## Summary
+
+This demo shows the intended usage pattern for `error-union`: one flat `AppError`, automatic `?` conversions from leaf errors, and precise conversion-site diagnostics through `Located<T>`.
