@@ -1,12 +1,12 @@
-# error-union
+# union-error
 
-`error-union` is a Rust crate for building a **flat, type-safe error system** with precise call-site tracking.
+`union-error` is a Rust crate for building a **flat, type-safe error system** with precise call-site tracking.
 
 The crate is designed for applications that want one centralized error enum (for example, `AppError`) without nested error trees, dynamic dispatch (`Box<dyn Error>`), or repeated boilerplate conversion code.
 
 ## Introduction
 
-`error-union` focuses on five goals:
+`union-error` focuses on five goals:
 
 1. **Single centralized error enum**: all propagated application errors are listed in one place.
 2. **No nested error types**: avoid patterns like `AppError::File(FileError::Parse(...))`.
@@ -46,7 +46,7 @@ If a function already returns `AppError`, using `?` in a caller returning `AppEr
 ### 1) You define the root enum
 
 ```rust
-use error_union::{ErrorUnion, Located};
+use union_error::{ErrorUnion, Located};
 
 #[derive(Debug, ErrorUnion)]
 pub enum AppError {
@@ -63,7 +63,7 @@ For each variant `Variant(Located<T>)`, the macro generates:
 impl From<T> for AppError {
     #[track_caller]
     fn from(source: T) -> Self {
-        Self::Variant(error_union::Located::new(source))
+        Self::Variant(union_error::Located::new(source))
     }
 }
 ```
@@ -98,10 +98,10 @@ This gives a typed top-level enum and preserved underlying leaf error.
 
 This repository is a Cargo workspace with two crates:
 
-- **`error-union`** (runtime crate)
+- **`union-error`** (runtime crate)
   - exports `Located<T>`
   - re-exports `ErrorUnion` derive macro
-- **`error-union-derive`** (proc-macro crate)
+- **`union-error-derive`** (proc-macro crate)
   - parses the enum
   - generates `From`, `Display`, and `Error` implementations
 

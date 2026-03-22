@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::panic::Location;
 
-pub use error_union_derive::ErrorUnion;
+pub use union_error_derive::ErrorUnion;
 
 #[derive(Debug)]
 pub struct Located<E> {

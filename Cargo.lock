@@ -6,23 +6,7 @@ version = 4
 name = "demo-app"
 version = "0.1.0"
 dependencies = [
- "error-union",
-]
-
-[[package]]
-name = "error-union"
-version = "0.1.0"
-dependencies = [
- "error-union-derive",
-]
-
-[[package]]
-name = "error-union-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "union-error",
 ]
 
 [[package]]
@@ -59,3 +43,19 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "union-error"
+version = "0.1.0"
+dependencies = [
+ "union-error-derive",
+]
+
+[[package]]
+name = "union-error-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
