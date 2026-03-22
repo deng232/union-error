@@ -7,6 +7,20 @@ use syn::{
     parse_macro_input, parse_quote, Data, DataEnum, DeriveInput, Fields, GenericArgument, Ident,
     Item, ItemEnum, PathArguments, Type, TypePath,
 };
+/*
+#[doc(hidden)]
+mod __private {
+    #[derive(Debug, Clone, Copy)]
+    pub struct LeafSpec {
+        pub variant_name: &'static str,
+        pub leaf_type_name: &'static str,
+    }
+
+    pub trait LocatedErrorMetadata {
+        const LEAVES: &'static [LeafSpec];
+    }
+}
+*/
 
 #[proc_macro_derive(ErrorUnion)]
 pub fn derive_union_error(input: TokenStream) -> TokenStream {
@@ -16,12 +30,24 @@ pub fn derive_union_error(input: TokenStream) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // `#[located_error]` is applied to module-local enums like:
+    //
+    //   #[located_error]
+    //   enum LocalErrors { Parse(ParseIntError), ... }
+    //
+    // It rewrites each single-field tuple variant from `T` to
+    // `::union_error::Located<T>`, then generates:
+    // - `From<T> for LocalErrors` with `#[track_caller]`
+    // - `Display` and `Error`
+    //
+    // The local enum remains local; this macro does NOT create the app-wide union.
     let mut item_enum = parse_macro_input!(item as ItemEnum);
 
     let mut seen_leaf_types = BTreeSet::new();
     let mut leaves = Vec::new();
 
     for variant in &mut item_enum.variants {
+        // Validate variant shape and extract the source leaf error type.
         let original_ty = match &variant.fields {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => fields.unnamed[0].ty.clone(),
             Fields::Named(_) => {
@@ -50,6 +76,7 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         };
 
+        // Support both `T` and `Located<T>` inputs, but normalize to leaf `T`.
         let leaf_ty = unwrap_located(&original_ty).unwrap_or_else(|| original_ty.clone());
         let leaf_key = type_key(&leaf_ty);
         if !seen_leaf_types.insert(leaf_key.clone()) {
@@ -61,6 +88,7 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
         }
 
+        // Rewrite field type in-place so users do not have to write `Located<T>`.
         if let Fields::Unnamed(fields) = &mut variant.fields {
             fields.unnamed[0].ty = parse_quote!(::union_error::Located<#leaf_ty>);
         }
@@ -69,6 +97,7 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let enum_ident = &item_enum.ident;
+    // Leaf conversion used by `?` inside module functions.
     let from_impls = leaves.iter().map(|(variant, ty)| {
         quote! {
             impl ::core::convert::From<#ty> for #enum_ident {
@@ -80,18 +109,21 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     });
 
+    // `Display` delegates to `Located<T>` formatting.
     let display_arms = leaves.iter().map(|(variant, _)| {
         quote! {
             Self::#variant(inner) => ::core::fmt::Display::fmt(inner, f),
         }
     });
 
+    // `Error::source` exposes the wrapped `Located<T>` and then `T`.
     let source_arms = leaves.iter().map(|(variant, _)| {
         quote! {
             Self::#variant(inner) => Some(inner as &(dyn ::std::error::Error + 'static)),
         }
     });
 
+    // Internal metadata scaffold (hidden API) produced for each local enum.
     let metadata_entries = leaves.iter().map(|(variant, ty)| {
         let variant_name = variant.to_string();
         let leaf_name = quote!(#ty).to_string();
@@ -136,11 +168,15 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn error_union(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // `#[error_union]` is applied only to the app/root enum in `error.rs`.
+    // It auto-flattens listed local enums into one top-level enum with
+    // direct leaf variants (`Parse`, `Io`, ...).
     let input = parse_macro_input!(item as DeriveInput);
     expand_error_union_enum(input).into()
 }
 
 fn expand_error_union_enum(input: DeriveInput) -> proc_macro2::TokenStream {
+    // Parse/validate outer enum and then resolve flattened leaves.
     let enum_name = input.ident;
     let data = match input.data {
         Data::Enum(e) => e,
@@ -178,6 +214,10 @@ fn build_union_tokens(
     enum_name: Ident,
     leaves: Vec<Leaf>,
 ) -> proc_macro2::TokenStream {
+    // The generated union is flat:
+    // AppError::{LeafVariant}(Located<LeafType>)
+    //
+    // No intermediate module wrappers at runtime.
     let union_variants = leaves.iter().map(|leaf| {
         let v = &leaf.variant_ident;
         let ty = &leaf.leaf_ty;
@@ -194,6 +234,7 @@ fn build_union_tokens(
         quote! { Self::#v(inner) => Some(inner as &(dyn ::std::error::Error + 'static)), }
     });
 
+    // Primary conversion path for `?` from leaf errors into AppError.
     let from_leaf_impls = leaves.iter().map(|leaf| {
         let v = &leaf.variant_ident;
         let ty = &leaf.leaf_ty;
@@ -207,6 +248,9 @@ fn build_union_tokens(
         }
     });
 
+    // Compatibility conversion from local module enum into AppError.
+    // This destructures local variants and forwards the already-captured
+    // `Located<T>` without creating a second location layer.
     let from_local_impls = leaves.iter().map(|leaf| {
         let local_enum_ty = &leaf.local_enum_ty;
         let local_variant = &leaf.local_variant_ident;
@@ -250,6 +294,10 @@ fn build_union_tokens(
 }
 
 fn resolve_union_leaves(data: &DataEnum) -> syn::Result<Vec<Leaf>> {
+    // Resolve each listed `crate::module::LocalErrors` and extract leaf variants.
+    //
+    // NOTE: current implementation reads/parses module source files to discover
+    // enum variants. This is why we resolve the module path to a file below.
     let mut leaves = Vec::new();
     let mut by_leaf_type = BTreeMap::<String, proc_macro2::Span>::new();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
@@ -279,12 +327,14 @@ fn resolve_union_leaves(data: &DataEnum) -> syn::Result<Vec<Leaf>> {
                 )
             })?;
 
+        // Parse local enum source and flatten each local leaf into the union.
         let local_enum = parse_local_enum(&module_file, &local_enum_name)?;
 
         for local_variant in local_enum.variants {
             let leaf_ty = single_field_type(&local_variant)?;
             let leaf_ty = unwrap_located(leaf_ty).unwrap_or_else(|| leaf_ty.clone());
             let key = type_key(&leaf_ty);
+            // Enforce one unique leaf type across the entire union.
             if let Some(_prev) = by_leaf_type.insert(key.clone(), local_variant.ident.span()) {
                 return Err(syn::Error::new_spanned(
                     &local_variant.ident,
@@ -308,6 +358,7 @@ fn resolve_union_leaves(data: &DataEnum) -> syn::Result<Vec<Leaf>> {
 }
 
 fn parse_local_enum(path: &Path, enum_name: &str) -> syn::Result<ItemEnum> {
+    // Lightweight source loader used by `#[error_union]` flattening.
     let content = fs::read_to_string(path).map_err(|e| {
         syn::Error::new(
             proc_macro2::Span::call_site(),
@@ -330,6 +381,7 @@ fn parse_local_enum(path: &Path, enum_name: &str) -> syn::Result<ItemEnum> {
 }
 
 fn module_path_for_local_enum(path: &syn::Path, enum_name: &str) -> syn::Result<Vec<String>> {
+    // Convert type path like `crate::file1::LocalErrors` -> ["file1"].
     let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     if segments.last().map(|s| s.as_str()) != Some(enum_name) {
         return Err(syn::Error::new_spanned(
@@ -351,6 +403,7 @@ fn module_path_for_local_enum(path: &syn::Path, enum_name: &str) -> syn::Result<
 }
 
 fn find_module_file(manifest_dir: &Path, module_path: &[String]) -> Option<PathBuf> {
+    // Search both conventional crate src and ad-hoc root locations.
     for base in [manifest_dir.join("src"), manifest_dir.to_path_buf()] {
         let mut p = base.clone();
         for seg in module_path {
@@ -372,6 +425,7 @@ fn find_module_file(manifest_dir: &Path, module_path: &[String]) -> Option<PathB
 }
 
 fn single_field_type(variant: &syn::Variant) -> syn::Result<&Type> {
+    // Shared validator: all supported enum variants are exactly one tuple field.
     match &variant.fields {
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => Ok(&fields.unnamed[0].ty),
         _ => Err(syn::Error::new_spanned(
@@ -382,6 +436,7 @@ fn single_field_type(variant: &syn::Variant) -> syn::Result<&Type> {
 }
 
 fn extract_type_path(ty: &Type) -> syn::Result<&TypePath> {
+    // Shared validator: union variant field must be a path type (`crate::x::Y`).
     match ty {
         Type::Path(path) => Ok(path),
         _ => Err(syn::Error::new_spanned(
@@ -392,6 +447,7 @@ fn extract_type_path(ty: &Type) -> syn::Result<&TypePath> {
 }
 
 fn unwrap_located(ty: &Type) -> Option<Type> {
+    // Helper to turn `Located<T>` into `T` when needed.
     let Type::Path(path) = ty else {
         return None;
     };
@@ -409,5 +465,6 @@ fn unwrap_located(ty: &Type) -> Option<Type> {
 }
 
 fn type_key(ty: &Type) -> String {
+    // Canonicalized type string used for duplicate detection.
     quote!(#ty).to_string().replace(' ', "")
 }
