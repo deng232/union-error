@@ -1,135 +1,131 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use syn::{
+    parse_macro_input, parse_quote, Data, DataEnum, DeriveInput, Fields, GenericArgument, Ident,
+    Item, ItemEnum, PathArguments, Type, TypePath,
+};
 
 #[proc_macro_derive(ErrorUnion)]
 pub fn derive_union_error(input: TokenStream) -> TokenStream {
-    // Parse the incoming Rust item as a `syn::DeriveInput`.
-    //
-    // This is the standard entry type for derive macros and contains:
-    // - the item name
-    // - visibility
-    // - attributes
-    // - generics
-    // - and the actual item data (enum / struct / union)
     let input = parse_macro_input!(input as DeriveInput);
+    expand_error_union_enum(input).into()
+}
 
-    // Save the enum name, e.g. `AppError`.
-    let enum_name = input.ident;
-
-    // We only support enums.
+#[proc_macro_attribute]
+pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // `#[located_error]` is applied to module-local enums like:
     //
-    // If the user writes `#[derive(ErrorUnion)]` on a struct or union,
-    // emit a compile error.
-    let data = match input.data {
-        Data::Enum(e) => e,
-        _ => {
-            return syn::Error::new_spanned(enum_name, "ErrorUnion only supports enums")
+    //   #[located_error]
+    //   enum LocalErrors { Parse(ParseIntError), ... }
+    //
+    // It rewrites each single-field tuple variant from `T` to
+    // `::union_error::Located<T>`, then generates:
+    // - `From<T> for LocalErrors` with `#[track_caller]`
+    // - `Display` and `Error`
+    //
+    // The local enum remains local; this macro does NOT create the app-wide union.
+    let mut item_enum = parse_macro_input!(item as ItemEnum);
+
+    let mut seen_leaf_types = BTreeSet::new();
+    let mut leaves = Vec::new();
+
+    for variant in &mut item_enum.variants {
+        // Validate variant shape and extract the source leaf error type.
+        let original_ty = match &variant.fields {
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => fields.unnamed[0].ty.clone(),
+            Fields::Named(_) => {
+                return syn::Error::new_spanned(
+                    &variant.ident,
+                    "located_error variants must use a single unnamed field",
+                )
                 .to_compile_error()
                 .into();
-        }
-    };
-
-    // These hold the generated pieces that will later be assembled into:
-    //
-    // - `impl From<T> for Enum`
-    // - `impl Display for Enum`
-    // - `impl Error for Enum`
-    let mut from_impls = Vec::new();
-    let mut display_arms = Vec::new();
-    let mut source_arms = Vec::new();
-
-    // Process each enum variant independently.
-    for variant in data.variants {
-        let variant_name = variant.ident;
-
-        // Require tuple variants with exactly one field:
-        //
-        // Good:
-        //   Parse(Located<ParseIntError>)
-        //
-        // Rejected:
-        //   Parse
-        //   Parse { source: ... }
-        //   Parse(A, B)
-        let field_ty = match variant.fields {
-            Fields::Unnamed(f) if f.unnamed.len() == 1 => f.unnamed.first().unwrap().ty.clone(),
-            _ => {
+            }
+            Fields::Unit => {
                 return syn::Error::new_spanned(
-                    variant_name,
-                    "Each variant must have exactly one unnamed field",
+                    &variant.ident,
+                    "located_error variants must use a single unnamed field",
+                )
+                .to_compile_error()
+                .into();
+            }
+            Fields::Unnamed(fields) => {
+                return syn::Error::new_spanned(
+                    fields,
+                    "located_error variants must use exactly one field",
                 )
                 .to_compile_error()
                 .into();
             }
         };
 
-        // Try to extract the inner type from `Located<T>`.
-        //
-        // Example:
-        //   field_ty = Located<std::io::Error>
-        //   inner_ty = std::io::Error
-        //
-        // If the field is not `Located<T>`, we fall back to using the field type
-        // directly. That keeps the macro behavior somewhat flexible, though the
-        // intended design is to use `Located<T>` for all variants.
-        let inner_ty = extract_inner_type(&field_ty).unwrap_or(field_ty.clone());
+        // Support both `T` and `Located<T>` inputs, but normalize to leaf `T`.
+        let leaf_ty = normalized_leaf_type(&original_ty);
+        let leaf_key = type_key(&leaf_ty);
+        if !seen_leaf_types.insert(leaf_key.clone()) {
+            return syn::Error::new_spanned(
+                &variant.ident,
+                "duplicate leaf error type in this located_error enum",
+            )
+            .to_compile_error()
+            .into();
+        }
 
-        // Generate:
-        //
-        // impl From<T> for Enum {
-        //     #[track_caller]
-        //     fn from(source: T) -> Self {
-        //         Self::Variant(union_error::Located::new(source))
-        //     }
-        // }
-        //
-        // This is the critical conversion used by `?`.
-        from_impls.push(quote! {
-            impl From<#inner_ty> for #enum_name {
-                #[track_caller]
-                fn from(source: #inner_ty) -> Self {
-                    Self::#variant_name(union_error::Located::new(source))
-                }
-            }
-        });
+        // Rewrite field type in-place so users do not have to write `Located<T>`.
+        if let Fields::Unnamed(fields) = &mut variant.fields {
+            fields.unnamed[0].ty = parse_quote!(::union_error::Located<#leaf_ty>);
+        }
 
-        // Generate a `Display` match arm that delegates to the stored inner value.
-        //
-        // Example:
-        //   Self::Parse(inner) => Display::fmt(inner, f)
-        //
-        // Since `Located<T>` implements `Display`, this prints both:
-        // - the inner source error message
-        // - the stored source location
-        display_arms.push(quote! {
-            Self::#variant_name(inner) => std::fmt::Display::fmt(inner, f),
-        });
-
-        // Generate an `Error::source()` match arm.
-        //
-        // Example:
-        //   Self::Parse(inner) => Some(inner as &(dyn Error + 'static))
-        //
-        // Since `Located<T>` also implements `Error`, the chain becomes:
-        //   AppError -> Located<T> -> T
-        source_arms.push(quote! {
-            Self::#variant_name(inner) => Some(inner as &(dyn std::error::Error + 'static)),
-        });
+        leaves.push((variant.ident.clone(), leaf_ty));
     }
 
-    // Assemble the final generated impls.
+    let enum_ident = &item_enum.ident;
+    // Leaf conversion used by `?` inside module functions.
+    let from_impls = leaves.iter().map(|(variant, ty)| {
+        quote! {
+            impl ::core::convert::From<#ty> for #enum_ident {
+                #[track_caller]
+                fn from(source: #ty) -> Self {
+                    Self::#variant(::union_error::Located::new(source))
+                }
+            }
+        }
+    });
+
+    // `Display` delegates to `Located<T>` formatting.
+    let display_arms = leaves.iter().map(|(variant, _)| display_arm(variant));
+
+    // `Error::source` exposes the wrapped `Located<T>` and then `T`.
+    let source_arms = leaves.iter().map(|(variant, _)| source_arm(variant));
+
+    // Internal metadata scaffold (hidden API) produced for each local enum.
+    let metadata_entries = leaves.iter().map(|(variant, ty)| {
+        let variant_name = variant.to_string();
+        let leaf_name = quote!(#ty).to_string();
+        quote! {
+            ::union_error::__private::LeafSpec {
+                variant_name: #variant_name,
+                leaf_type_name: #leaf_name,
+            }
+        }
+    });
+
     let expanded = quote! {
-        impl std::fmt::Display for #enum_name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #item_enum
+
+        impl ::core::fmt::Display for #enum_ident {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 match self {
                     #(#display_arms)*
                 }
             }
         }
 
-        impl std::error::Error for #enum_name {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        impl ::std::error::Error for #enum_ident {
+            fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
                 match self {
                     #(#source_arms)*
                 }
@@ -137,67 +133,330 @@ pub fn derive_union_error(input: TokenStream) -> TokenStream {
         }
 
         #(#from_impls)*
+
+        impl ::union_error::__private::LocatedErrorMetadata for #enum_ident {
+            const LEAVES: &'static [::union_error::__private::LeafSpec] = &[
+                #(#metadata_entries),*
+            ];
+        }
     };
 
     expanded.into()
 }
 
-/// Extract the inner type `T` from `Located<T>`.
-///
-/// # Example
-///
-/// Input:
-///
-/// ```ignore
-/// Located<std::io::Error>
-/// ```
-///
-/// Output:
-///
-/// ```ignore
-/// Some(std::io::Error)
-/// ```
-///
-/// If the input is not a path type ending in `Located<...>`, this returns `None`.
-///
-/// # Why this helper exists
-///
-/// The derive macro wants to generate:
-///
-/// ```ignore
-/// impl From<T> for AppError
-/// ```
-///
-/// not:
-///
-/// ```ignore
-/// impl From<Located<T>> for AppError
-/// ```
-///
-/// because the `?` operator naturally converts from the original leaf error type.
-fn extract_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    // We only care about path types like:
-    // - Located<T>
-    // - union_error::Located<T>
-    if let syn::Type::Path(type_path) = ty {
-        // Look at the last path segment.
-        //
-        // Examples:
-        // - Located<T>                  -> last segment = Located
-        // - union_error::Located<T>     -> last segment = Located
-        let seg = type_path.path.segments.last()?;
+#[proc_macro_attribute]
+pub fn error_union(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // `#[error_union]` is applied only to the app/root enum in `error.rs`.
+    // It auto-flattens listed local enums into one top-level enum with
+    // direct leaf variants (`Parse`, `Io`, ...).
+    let input = parse_macro_input!(item as DeriveInput);
+    expand_error_union_enum(input).into()
+}
 
-        // Only match types whose last path segment is literally `Located`.
-        if seg.ident == "Located" {
-            // Require angle-bracket generic arguments: `Located<T>`
-            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                // Take the first generic argument if it is a type.
-                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                    return Some(inner.clone());
+fn expand_error_union_enum(input: DeriveInput) -> proc_macro2::TokenStream {
+    // Parse/validate outer enum and then resolve flattened leaves.
+    let enum_name = input.ident;
+    let data = match input.data {
+        Data::Enum(e) => e,
+        _ => {
+            return syn::Error::new_spanned(enum_name, "error_union only supports enums")
+                .to_compile_error();
+        }
+    };
+
+    if let Some(where_clause) = input.generics.where_clause {
+        return syn::Error::new_spanned(where_clause, "error_union does not support generics")
+            .to_compile_error();
+    }
+
+    let attrs = input.attrs;
+    let vis = input.vis;
+
+    match resolve_union_leaves(&data) {
+        Ok(leaves) => build_union_tokens(attrs, vis, enum_name, leaves),
+        Err(err) => err.to_compile_error(),
+    }
+}
+
+#[derive(Clone)]
+struct Leaf {
+    variant_ident: Ident,
+    leaf_ty: Type,
+    local_enum_ty: Type,
+    local_variant_ident: Ident,
+}
+
+fn build_union_tokens(
+    attrs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
+    enum_name: Ident,
+    leaves: Vec<Leaf>,
+) -> proc_macro2::TokenStream {
+    // The generated union is flat:
+    // AppError::{LeafVariant}(Located<LeafType>)
+    //
+    // No intermediate module wrappers at runtime.
+    let union_variants = leaves.iter().map(|leaf| {
+        let v = &leaf.variant_ident;
+        let ty = &leaf.leaf_ty;
+        quote! { #v(::union_error::Located<#ty>) }
+    });
+
+    let display_arms = leaves.iter().map(|leaf| display_arm(&leaf.variant_ident));
+
+    let source_arms = leaves.iter().map(|leaf| source_arm(&leaf.variant_ident));
+
+    // Primary conversion path for `?` from leaf errors into AppError.
+    let from_leaf_impls = leaves.iter().map(|leaf| {
+        let v = &leaf.variant_ident;
+        let ty = &leaf.leaf_ty;
+        quote! {
+            impl ::core::convert::From<#ty> for #enum_name {
+                #[track_caller]
+                fn from(source: #ty) -> Self {
+                    Self::#v(::union_error::Located::new(source))
                 }
+            }
+        }
+    });
+
+    // Compatibility conversion from each local module enum into AppError.
+    // Group leaves by local enum so we emit one impl per enum.
+    let mut by_local_enum = BTreeMap::<String, (Type, Vec<(Ident, Ident)>)>::new();
+    for leaf in &leaves {
+        let (_, variants) = by_local_enum
+            .entry(type_key(&leaf.local_enum_ty))
+            .or_insert_with(|| (leaf.local_enum_ty.clone(), Vec::new()));
+        variants.push((leaf.local_variant_ident.clone(), leaf.variant_ident.clone()));
+    }
+
+    let from_local_impls = by_local_enum
+        .into_values()
+        .map(|(local_enum_ty, variants)| {
+            let arms = variants.iter().map(|(local_variant, union_variant)| {
+                quote! { #local_enum_ty::#local_variant(inner) => Self::#union_variant(inner), }
+            });
+            quote! {
+                impl ::core::convert::From<#local_enum_ty> for #enum_name {
+                    fn from(source: #local_enum_ty) -> Self {
+                        match source {
+                            #(#arms)*
+                        }
+                    }
+                }
+            }
+        });
+
+    quote! {
+        #(#attrs)*
+        #vis enum #enum_name {
+            #(#union_variants),*
+        }
+
+        impl ::core::fmt::Display for #enum_name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                match self {
+                    #(#display_arms)*
+                }
+            }
+        }
+
+        impl ::std::error::Error for #enum_name {
+            fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+                match self {
+                    #(#source_arms)*
+                }
+            }
+        }
+
+        #(#from_leaf_impls)*
+        #(#from_local_impls)*
+    }
+}
+
+fn resolve_union_leaves(data: &DataEnum) -> syn::Result<Vec<Leaf>> {
+    // Resolve each listed `crate::module::LocalErrors` and extract leaf variants.
+    //
+    // NOTE: current implementation reads/parses module source files to discover
+    // enum variants. This is why we resolve the module path to a file below.
+    let mut leaves = Vec::new();
+    let mut by_leaf_type = BTreeMap::<String, proc_macro2::Span>::new();
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+
+    for variant in &data.variants {
+        let local_enum_ty = single_field_type(variant)?;
+        let local_enum_path = extract_type_path(local_enum_ty)?;
+        let local_enum_name = local_enum_path
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .ok_or_else(|| {
+                syn::Error::new_spanned(local_enum_ty, "invalid local enum type path")
+            })?;
+
+        let module_path = module_path_for_local_enum(&local_enum_path.path, &local_enum_name)?;
+        let module_file =
+            find_module_file(Path::new(&manifest_dir), &module_path).ok_or_else(|| {
+                syn::Error::new_spanned(
+                    local_enum_ty,
+                    format!(
+                        "could not find module source for `{}` at `src/{}`",
+                        local_enum_name,
+                        module_path.join("/")
+                    ),
+                )
+            })?;
+
+        // Parse local enum source and flatten each local leaf into the union.
+        let local_enum = parse_local_enum(&module_file, &local_enum_name)?;
+
+        for local_variant in local_enum.variants {
+            let leaf_ty = normalized_leaf_type(single_field_type(&local_variant)?);
+            let key = type_key(&leaf_ty);
+            // Enforce one unique leaf type across the entire union.
+            if let Some(_prev) = by_leaf_type.insert(key.clone(), local_variant.ident.span()) {
+                return Err(syn::Error::new_spanned(
+                    &local_variant.ident,
+                    format!(
+                        "duplicate leaf error type across unioned local enums: `{}`",
+                        key
+                    ),
+                ));
+            }
+
+            leaves.push(Leaf {
+                variant_ident: local_variant.ident.clone(),
+                leaf_ty,
+                local_enum_ty: local_enum_ty.clone(),
+                local_variant_ident: local_variant.ident,
+            });
+        }
+    }
+
+    Ok(leaves)
+}
+
+fn parse_local_enum(path: &Path, enum_name: &str) -> syn::Result<ItemEnum> {
+    // Lightweight source loader used by `#[error_union]` flattening.
+    let content = fs::read_to_string(path).map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("failed reading {}: {}", path.display(), e),
+        )
+    })?;
+    let file = syn::parse_file(&content)?;
+    for item in file.items {
+        if let Item::Enum(item_enum) = item {
+            if item_enum.ident == enum_name {
+                return Ok(item_enum);
             }
         }
     }
 
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        format!("could not find enum `{}` in {}", enum_name, path.display()),
+    ))
+}
+
+fn module_path_for_local_enum(path: &syn::Path, enum_name: &str) -> syn::Result<Vec<String>> {
+    // Convert type path like `crate::file1::LocalErrors` -> ["file1"].
+    let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    if segments.last().map(|s| s.as_str()) != Some(enum_name) {
+        return Err(syn::Error::new_spanned(
+            path,
+            "union variant must reference a local enum type",
+        ));
+    }
+    segments.pop();
+    if segments.first().map(|s| s.as_str()) == Some("crate") {
+        segments.remove(0);
+    }
+    if segments.is_empty() {
+        return Err(syn::Error::new_spanned(
+            path,
+            "could not resolve module path",
+        ));
+    }
+    Ok(segments)
+}
+
+fn find_module_file(manifest_dir: &Path, module_path: &[String]) -> Option<PathBuf> {
+    // Search both conventional crate src and ad-hoc root locations.
+    for base in [manifest_dir.join("src"), manifest_dir.to_path_buf()] {
+        let mut p = base.clone();
+        for seg in module_path {
+            p.push(seg);
+        }
+
+        let flat = p.with_extension("rs");
+        if flat.exists() {
+            return Some(flat);
+        }
+
+        let nested = p.join("mod.rs");
+        if nested.exists() {
+            return Some(nested);
+        }
+    }
+
     None
+}
+
+fn single_field_type(variant: &syn::Variant) -> syn::Result<&Type> {
+    // Shared validator: all supported enum variants are exactly one tuple field.
+    match &variant.fields {
+        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => Ok(&fields.unnamed[0].ty),
+        _ => Err(syn::Error::new_spanned(
+            &variant.ident,
+            "each variant must have exactly one unnamed field",
+        )),
+    }
+}
+
+fn extract_type_path(ty: &Type) -> syn::Result<&TypePath> {
+    // Shared validator: union variant field must be a path type (`crate::x::Y`).
+    match ty {
+        Type::Path(path) => Ok(path),
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "variant field must be a path type",
+        )),
+    }
+}
+
+fn display_arm(variant: &Ident) -> proc_macro2::TokenStream {
+    quote! { Self::#variant(inner) => ::core::fmt::Display::fmt(inner, f), }
+}
+
+fn source_arm(variant: &Ident) -> proc_macro2::TokenStream {
+    quote! { Self::#variant(inner) => Some(inner as &(dyn ::std::error::Error + 'static)), }
+}
+
+fn normalized_leaf_type(ty: &Type) -> Type {
+    unwrap_located(ty).unwrap_or_else(|| ty.clone())
+}
+
+fn unwrap_located(ty: &Type) -> Option<Type> {
+    // Helper to turn `Located<T>` into `T` when needed.
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Located" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    let GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    Some(inner.clone())
+}
+
+fn type_key(ty: &Type) -> String {
+    // Canonicalized type string used for duplicate detection.
+    quote!(#ty).to_string().replace(' ', "")
 }

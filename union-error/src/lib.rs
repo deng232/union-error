@@ -4,7 +4,20 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::panic::Location;
 
-pub use union_error_derive::ErrorUnion;
+pub use union_error_derive::{error_union, located_error, ErrorUnion};
+
+#[doc(hidden)]
+pub mod __private {
+    #[derive(Debug, Clone, Copy)]
+    pub struct LeafSpec {
+        pub variant_name: &'static str,
+        pub leaf_type_name: &'static str,
+    }
+
+    pub trait LocatedErrorMetadata {
+        const LEAVES: &'static [LeafSpec];
+    }
+}
 
 #[derive(Debug)]
 pub struct Located<E> {

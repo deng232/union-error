@@ -1,10 +1,14 @@
+#[path = "duplicate_leaf_file1.rs"]
+mod file1;
+#[path = "duplicate_leaf_file2.rs"]
+mod file2;
+
 use union_error::error_union;
 
 #[error_union]
-#[derive(Debug)]
-pub enum AppError {
+enum AppError {
     File1(crate::file1::LocalErrors),
     File2(crate::file2::LocalErrors),
 }
 
-pub type Result<T> = std::result::Result<T, AppError>;
+fn main() {}
