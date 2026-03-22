@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Derive macro for error_union"
-
+repository = "https://github.com/deng232/error-union"
 [lib]
 proc-macro = true
 
