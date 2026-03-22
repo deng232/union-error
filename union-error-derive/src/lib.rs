@@ -7,20 +7,6 @@ use syn::{
     parse_macro_input, parse_quote, Data, DataEnum, DeriveInput, Fields, GenericArgument, Ident,
     Item, ItemEnum, PathArguments, Type, TypePath,
 };
-/*
-#[doc(hidden)]
-mod __private {
-    #[derive(Debug, Clone, Copy)]
-    pub struct LeafSpec {
-        pub variant_name: &'static str,
-        pub leaf_type_name: &'static str,
-    }
-
-    pub trait LocatedErrorMetadata {
-        const LEAVES: &'static [LeafSpec];
-    }
-}
-*/
 
 #[proc_macro_derive(ErrorUnion)]
 pub fn derive_union_error(input: TokenStream) -> TokenStream {
@@ -77,7 +63,7 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         // Support both `T` and `Located<T>` inputs, but normalize to leaf `T`.
-        let leaf_ty = unwrap_located(&original_ty).unwrap_or_else(|| original_ty.clone());
+        let leaf_ty = normalized_leaf_type(&original_ty);
         let leaf_key = type_key(&leaf_ty);
         if !seen_leaf_types.insert(leaf_key.clone()) {
             return syn::Error::new_spanned(
@@ -110,18 +96,10 @@ pub fn located_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
     });
 
     // `Display` delegates to `Located<T>` formatting.
-    let display_arms = leaves.iter().map(|(variant, _)| {
-        quote! {
-            Self::#variant(inner) => ::core::fmt::Display::fmt(inner, f),
-        }
-    });
+    let display_arms = leaves.iter().map(|(variant, _)| display_arm(variant));
 
     // `Error::source` exposes the wrapped `Located<T>` and then `T`.
-    let source_arms = leaves.iter().map(|(variant, _)| {
-        quote! {
-            Self::#variant(inner) => Some(inner as &(dyn ::std::error::Error + 'static)),
-        }
-    });
+    let source_arms = leaves.iter().map(|(variant, _)| source_arm(variant));
 
     // Internal metadata scaffold (hidden API) produced for each local enum.
     let metadata_entries = leaves.iter().map(|(variant, ty)| {
@@ -224,15 +202,9 @@ fn build_union_tokens(
         quote! { #v(::union_error::Located<#ty>) }
     });
 
-    let display_arms = leaves.iter().map(|leaf| {
-        let v = &leaf.variant_ident;
-        quote! { Self::#v(inner) => ::core::fmt::Display::fmt(inner, f), }
-    });
+    let display_arms = leaves.iter().map(|leaf| display_arm(&leaf.variant_ident));
 
-    let source_arms = leaves.iter().map(|leaf| {
-        let v = &leaf.variant_ident;
-        quote! { Self::#v(inner) => Some(inner as &(dyn ::std::error::Error + 'static)), }
-    });
+    let source_arms = leaves.iter().map(|leaf| source_arm(&leaf.variant_ident));
 
     // Primary conversion path for `?` from leaf errors into AppError.
     let from_leaf_impls = leaves.iter().map(|leaf| {
@@ -248,23 +220,32 @@ fn build_union_tokens(
         }
     });
 
-    // Compatibility conversion from local module enum into AppError.
-    // This destructures local variants and forwards the already-captured
-    // `Located<T>` without creating a second location layer.
-    let from_local_impls = leaves.iter().map(|leaf| {
-        let local_enum_ty = &leaf.local_enum_ty;
-        let local_variant = &leaf.local_variant_ident;
-        let union_variant = &leaf.variant_ident;
-        quote! {
-            impl ::core::convert::From<#local_enum_ty> for #enum_name {
-                fn from(source: #local_enum_ty) -> Self {
-                    match source {
-                        #local_enum_ty::#local_variant(inner) => Self::#union_variant(inner),
+    // Compatibility conversion from each local module enum into AppError.
+    // Group leaves by local enum so we emit one impl per enum.
+    let mut by_local_enum = BTreeMap::<String, (Type, Vec<(Ident, Ident)>)>::new();
+    for leaf in &leaves {
+        let (_, variants) = by_local_enum
+            .entry(type_key(&leaf.local_enum_ty))
+            .or_insert_with(|| (leaf.local_enum_ty.clone(), Vec::new()));
+        variants.push((leaf.local_variant_ident.clone(), leaf.variant_ident.clone()));
+    }
+
+    let from_local_impls = by_local_enum
+        .into_values()
+        .map(|(local_enum_ty, variants)| {
+            let arms = variants.iter().map(|(local_variant, union_variant)| {
+                quote! { #local_enum_ty::#local_variant(inner) => Self::#union_variant(inner), }
+            });
+            quote! {
+                impl ::core::convert::From<#local_enum_ty> for #enum_name {
+                    fn from(source: #local_enum_ty) -> Self {
+                        match source {
+                            #(#arms)*
+                        }
                     }
                 }
             }
-        }
-    });
+        });
 
     quote! {
         #(#attrs)*
@@ -331,8 +312,7 @@ fn resolve_union_leaves(data: &DataEnum) -> syn::Result<Vec<Leaf>> {
         let local_enum = parse_local_enum(&module_file, &local_enum_name)?;
 
         for local_variant in local_enum.variants {
-            let leaf_ty = single_field_type(&local_variant)?;
-            let leaf_ty = unwrap_located(leaf_ty).unwrap_or_else(|| leaf_ty.clone());
+            let leaf_ty = normalized_leaf_type(single_field_type(&local_variant)?);
             let key = type_key(&leaf_ty);
             // Enforce one unique leaf type across the entire union.
             if let Some(_prev) = by_leaf_type.insert(key.clone(), local_variant.ident.span()) {
@@ -444,6 +424,18 @@ fn extract_type_path(ty: &Type) -> syn::Result<&TypePath> {
             "variant field must be a path type",
         )),
     }
+}
+
+fn display_arm(variant: &Ident) -> proc_macro2::TokenStream {
+    quote! { Self::#variant(inner) => ::core::fmt::Display::fmt(inner, f), }
+}
+
+fn source_arm(variant: &Ident) -> proc_macro2::TokenStream {
+    quote! { Self::#variant(inner) => Some(inner as &(dyn ::std::error::Error + 'static)), }
+}
+
+fn normalized_leaf_type(ty: &Type) -> Type {
+    unwrap_located(ty).unwrap_or_else(|| ty.clone())
 }
 
 fn unwrap_located(ty: &Type) -> Option<Type> {
